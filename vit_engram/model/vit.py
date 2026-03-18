@@ -20,6 +20,8 @@ class ViTConfig:
     k: int = 1
     c: float = 1.0
     depth: int = 16
+    use_moe:bool=False
+
 
 class PatchEmbedding(nn.Module):
     def __init__(self, cfg:ViTConfig):
@@ -124,7 +126,7 @@ class SwitchGate(nn.Module):
 
         return gate_scores, None
 
-class SwitchMoE(nn.Module):
+class SwitchMoE(nn.Module): 
     """
     A module that implements the Switched Mixture of Experts (MoE) architecture.
 
@@ -285,12 +287,12 @@ class VMOE_Encoder(nn.Module) :
         return x, aux_loss/len(self.layer)
 
 class VIT(nn.Module) :
-    def __init__(self, cfg:ViTConfig, use_moe:bool=False, class_n:int=10):
+    def __init__(self, cfg:ViTConfig, class_n:int):
         super().__init__()
-        self.use_moe = use_moe
+        self.use_moe = cfg.use_moe
         
         self.patch_emb = PatchEmbedding(cfg)
-        self.Encoder = VMOE_Encoder(cfg) if use_moe else MSA_Encoder(cfg)
+        self.Encoder = VMOE_Encoder(cfg) if cfg.use_moe else MSA_Encoder(cfg)
         self.cls_head = nn.Sequential(
             nn.LayerNorm(cfg.emb_dim),
             nn.Linear(cfg.emb_dim, cfg.emb_dim),
@@ -311,15 +313,35 @@ class VIT(nn.Module) :
             return out, aux_loss
         return out
 
-
-if __name__ == "__main__" :
-    config = ViTConfig(
-        emb_dim=64,
-        n_heads=4,
-        ffn_mul=1,
-        n_experts=8,
-        depth=4
+@dataclass
+class vit_model :
+    VIT_S_32 = ViTConfig(
+            emb_dim=512,
+            n_heads=8,
+            ffn_mul=4,
+            n_experts=32,
+            depth=8,
+            patch_size=32,
+            c=1.05,
+            k=1,
+            use_moe=False
+        )
+    VMOE_S_32 = ViTConfig(
+            emb_dim=512,
+            n_heads=8,
+            ffn_mul=4,
+            n_experts=32,
+            depth=8,
+            patch_size=32,
+            c=1.05,
+            k=1,
+            use_moe=True 
     )
-    test_model = VIT(config, use_moe=True, class_n=3)
-    x = torch.randn((10, 3, 224, 224), device='cuda')
-    summary(test_model, (10, 3, 224, 224))
+ 
+if __name__ == "__main__" :
+    test_model = VIT(vit_model.VIT_S_32, class_n=18291)
+    test_model_moe = VIT(vit_model.VMOE_S_32, class_n=18291)
+
+    import math
+    print(round(summary(test_model, (10, 3, 224, 224), verbose=0).total_params/1000000, 1), "M")
+    print(round(summary(test_model_moe, (10, 3, 224, 224), verbose=0).total_params/1000000, 1), "M")
