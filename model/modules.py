@@ -1,55 +1,6 @@
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from torchinfo import summary
-from einops import repeat
-from einops.layers.torch import Rearrange
-from dataclasses import dataclass
-
-@dataclass
-class ViTConfig:
-    in_channels: int = 3
-    patch_size: int = 16
-    img_size: int = 224
-    emb_dim: int = 128
-    n_heads: int = 8
-    attn_dropout: float = 0.1
-    ffn_mul: int = 4
-    ffn_dropout: float = 0.1
-    n_experts: int = 16
-    k: int = 1
-    c: float = 1.0
-    depth: int = 16
-    use_moe:bool=False
-
-
-class PatchEmbedding(nn.Module):
-    def __init__(self, cfg:ViTConfig):
-        self.patch_size = cfg.patch_size
-        super().__init__()
-        self.projection = nn.Sequential(
-            # using a conv layer instead of a linear one -> performance gains
-            nn.Conv2d(cfg.in_channels, cfg.emb_dim, kernel_size=cfg.patch_size, stride=cfg.patch_size),
-            Rearrange('b e (h) (w) -> b (h w) e'),
-        )
-        self.positions = nn.Parameter(torch.randn((cfg.img_size // cfg.patch_size) **2, cfg.emb_dim))
-
-        
-    def forward(self, x: Tensor) -> Tensor:
-        b, _, _, _ = x.shape
-        x = self.projection(x)
-        # add position embedding
-        x += self.positions
-        return x
-
-class FeedForwardBlock(nn.Sequential):
-    def __init__(self, emb_size: int, expansion: int = 4, drop_p: float = 0.):
-        super().__init__(
-            nn.Linear(emb_size, expansion * emb_size),
-            nn.GELU(),
-            nn.Dropout(drop_p),
-            nn.Linear(expansion * emb_size, emb_size),
-        )
 
 class SwitchGate(nn.Module):
     """
@@ -158,6 +109,7 @@ class SwitchMoE(nn.Module):
         num_experts: int,
         k:int,
         capacity_factor: float = 1.0,
+        drop_p: float = 0.1,
         *args,
         **kwargs,
     ):
@@ -170,7 +122,7 @@ class SwitchMoE(nn.Module):
 
         self.experts = nn.ModuleList(
             [
-                FeedForwardBlock(dim, expansion)
+                FeedForwardBlock(dim, expansion, drop_p)
                 for _ in range(num_experts)
             ]
         )
@@ -221,17 +173,27 @@ class SwitchMoE(nn.Module):
 
         return moe_output, loss
 
+
+class FeedForwardBlock(nn.Sequential):
+    def __init__(self, emb_size: int, expansion: int = 4, drop_p: float = 0.):
+        super().__init__(
+            nn.Linear(emb_size, expansion * emb_size),
+            nn.GELU(),
+            nn.Dropout(drop_p),
+            nn.Linear(expansion * emb_size, emb_size),
+        )
+
 class MSABLock(nn.Module) :
-    def __init__(self, cfg:ViTConfig):
+    def __init__(self, emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout):
         super().__init__()
-        self.norm = nn.LayerNorm(normalized_shape=cfg.emb_dim)
-        self.MSA = nn.MultiheadAttention(embed_dim=cfg.emb_dim,
-                                         num_heads=cfg.n_heads,
-                                         dropout=cfg.attn_dropout,
+        self.norm = nn.LayerNorm(normalized_shape=emb_dim)
+        self.MSA = nn.MultiheadAttention(embed_dim=emb_dim,
+                                         num_heads=n_heads,
+                                         dropout=attn_dropout,
                                          batch_first=True)
-        self.FFN = FeedForwardBlock(emb_size=cfg.emb_dim,
-                                    expansion=cfg.ffn_mul,
-                                    drop_p=cfg.ffn_dropout)
+        self.FFN = FeedForwardBlock(emb_size=emb_dim,
+                                    expansion=ffn_mul,
+                                    drop_p=ffn_dropout)
     def forward(self, x) :
         out_1 = self.norm(x)
         attn_output, _ = self.MSA(out_1, out_1, out_1, need_weights=False)
@@ -241,19 +203,20 @@ class MSABLock(nn.Module) :
         out_2 = self.FFN(out_2) + out_1
         return out_2
     
-class VMOEBLock(nn.Module) :
-    def __init__(self, cfg:ViTConfig):
+class MOEBLock(nn.Module) :
+    def __init__(self, emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, n_experts, k, c):
         super().__init__()
-        self.norm = nn.LayerNorm(normalized_shape=cfg.emb_dim)
-        self.MSA = nn.MultiheadAttention(embed_dim=cfg.emb_dim,
-                                         num_heads=cfg.n_heads,
-                                         dropout=cfg.attn_dropout,
+        self.norm = nn.LayerNorm(normalized_shape=emb_dim)
+        self.MSA = nn.MultiheadAttention(embed_dim=emb_dim,
+                                         num_heads=n_heads,
+                                         dropout=attn_dropout,
                                          batch_first=True)
-        self.moe = SwitchMoE(dim=cfg.emb_dim,
-                             expansion=cfg.ffn_mul,
-                             num_experts=cfg.n_experts,
-                             k=cfg.k,
-                             capacity_factor=cfg.c)
+        self.moe = SwitchMoE(dim=emb_dim,
+                             expansion=ffn_mul,
+                             num_experts=n_experts,
+                             k=k,
+                             capacity_factor=c,
+                             drop_p=ffn_dropout)
     def forward(self, x) :
         out_1 = self.norm(x)
         attn_output, _ = self.MSA(out_1, out_1, out_1, need_weights=False)
@@ -265,16 +228,26 @@ class VMOEBLock(nn.Module) :
         out_3.add_(out_1)
         return out_3, aux_loss
 
-class MSA_Encoder(nn.Sequential) :
-    def __init__(self,
-                 cfg:ViTConfig):
-        super().__init__(*[MSABLock(cfg) for _ in range(cfg.depth)])
 
-class VMOE_Encoder(nn.Module) :
-    def __init__(self,
-                 cfg:ViTConfig):
+
+
+class MSA_Encoder(nn.Sequential) :
+    def __init__(self,emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, depth):
+        super().__init__(*[MSABLock(emb_dim=emb_dim,
+                                    n_heads=n_heads,
+                                    attn_dropout=attn_dropout,
+                                    ffn_mul=ffn_mul,
+                                    ffn_dropout=ffn_dropout) for _ in range(depth)])
+
+class MOE_Encoder(nn.Module) :
+    def __init__(self,emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, depth, ):
         super().__init__()
-        self.layer = nn.ModuleList([layer for _ in range(cfg.depth//2) for layer in (MSABLock(cfg), VMOEBLock(cfg))])
+        self.layer = nn.ModuleList([layer for _ in range(depth//2) for layer in (
+                           MSABLock(emb_dim=emb_dim,
+                                    n_heads=n_heads,
+                                    attn_dropout=attn_dropout,
+                                    ffn_mul=ffn_mul,
+                                    ffn_dropout=ffn_dropout), MOEBLock())])
 
     def forward(self, x) :
         aux_loss = 0
@@ -285,63 +258,3 @@ class VMOE_Encoder(nn.Module) :
                 x, loss = l(x)
                 aux_loss += loss
         return x, aux_loss/len(self.layer)
-
-class VIT(nn.Module) :
-    def __init__(self, cfg:ViTConfig, class_n:int):
-        super().__init__()
-        self.use_moe = cfg.use_moe
-        
-        self.patch_emb = PatchEmbedding(cfg)
-        self.Encoder = VMOE_Encoder(cfg) if cfg.use_moe else MSA_Encoder(cfg)
-        self.cls_head = nn.Sequential(
-            nn.LayerNorm(cfg.emb_dim),
-            nn.Linear(cfg.emb_dim, cfg.emb_dim),
-            nn.GELU(),
-            nn.Linear(cfg.emb_dim, class_n)
-        )
-
-    def forward(self, x) :
-        emb = self.patch_emb(x)
-        if self.use_moe :
-            feat, aux_loss = self.Encoder(emb)
-        else :
-            feat = self.Encoder(emb)
-        feat = feat.mean(dim=1).squeeze()
-        out = self.cls_head(feat)
-        
-        if self.use_moe :
-            return out, aux_loss
-        return out
-
-@dataclass
-class vit_model :
-    VIT_S_32 = ViTConfig(
-            emb_dim=512,
-            n_heads=8,
-            ffn_mul=4,
-            n_experts=32,
-            depth=8,
-            patch_size=32,
-            c=1.05,
-            k=1,
-            use_moe=False
-        )
-    VMOE_S_32 = ViTConfig(
-            emb_dim=512,
-            n_heads=8,
-            ffn_mul=4,
-            n_experts=32,
-            depth=8,
-            patch_size=32,
-            c=1.05,
-            k=1,
-            use_moe=True 
-    )
- 
-if __name__ == "__main__" :
-    test_model = VIT(vit_model.VIT_S_32, class_n=18291)
-    test_model_moe = VIT(vit_model.VMOE_S_32, class_n=18291)
-
-    import math
-    print(round(summary(test_model, (10, 3, 224, 224), verbose=0).total_params/1000000, 1), "M")
-    print(round(summary(test_model_moe, (10, 3, 224, 224), verbose=0).total_params/1000000, 1), "M")
