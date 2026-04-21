@@ -7,7 +7,7 @@ from Image_encoder import VIT
 from text_encoder import TET
 
 class CLIP(nn.Module) :
-    def __init__(self, image_encoder_cfg:ViTConfig, text_encoder_cfg:TETConfig):
+    def __init__(self, image_encoder_cfg:ViTConfig, text_encoder_cfg:TETConfig, ):
         super().__init__()
         self.i_cfg = image_encoder_cfg
         self.t_cfg = text_encoder_cfg
@@ -88,8 +88,6 @@ if __name__ == "__main__" :
     temp_model = CLIP(image_encoder_cfg = model_configs.vit_model.VIT_S_32, text_encoder_cfg=model_configs.tet_model.TET_S_32)
     test_img = torch.randn((100, 3,224, 224))
     test_text = torch.randint(0, 100, (100, 77))
-    
-    torchinfo.summary(temp_model, input_data=[test_img, test_text])
 
     l_i, l_t, _, _ = temp_model([test_img, test_text])
     print(l_i.shape)

@@ -86,6 +86,9 @@ class tet_model :
         use_moe=True,
         every_2=False
     )
+
+class engram_config :
+    engram_
     
 if __name__ == "__main__" :
     from text_encoder import TET
