@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from engram import EngramModule
 
 class Fast_GELU(nn.Module) :
     def forward(self, x: torch.Tensor):
@@ -203,11 +204,18 @@ class MSABLock(nn.Module) :
                                     expansion=ffn_mul,
                                     drop_p=ffn_dropout)
     def forward(self, x) :
+        if x.shape.count() == 4 :
+            B, L, hc, D = x.shape
+            x = x.contiguous.reshape((B*hc, L, D))
+
         norm_x = self.norm1(x)
         feat, _ = self.MSA(norm_x, norm_x, norm_x, need_weights=False)
         x = x + feat
         out = self.FFN(self.norm2(x))
         out = out + x
+        
+        if x.shape.count() == 4 :
+            out = out.contiguous.reshape((B, L, hc, D))
         return out
     
 class MOEBlock(nn.Module) :
@@ -226,16 +234,22 @@ class MOEBlock(nn.Module) :
                              k=k,
                              capacity_factor=c,
                              drop_p=ffn_dropout)
-    def forward(self, x) :
+    def forward(self, x:torch.Tensor) :
+        if x.shape.count() == 4 :
+            B, L, hc, D = x.shape
+            x = x.contiguous.reshape((B*hc, L, D))
+
         norm_x = self.norm1(x)
         feat, _ = self.MSA(norm_x, norm_x, norm_x)
         x = x + feat
         out, aux_loss = self.moe(self.norm2(x))
         out = out + x
+
+        out = out.contiguous.reshape((B, L, hc, D))
         return out, aux_loss
 
 class MSA_Encoder(nn.Sequential) :
-    def __init__(self,emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, depth, mask=None):
+    def __init__(self,emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, depth, engram_layer,mask=None):
         super().__init__(*[MSABLock(emb_dim=emb_dim,
                                     n_heads=n_heads,
                                     attn_dropout=attn_dropout,
@@ -244,7 +258,7 @@ class MSA_Encoder(nn.Sequential) :
                                     mask=mask) for _ in range(depth)])
 
 class MOE_Encoder(nn.Module) :
-    def __init__(self,emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, c, k, n_experts,depth, every_2, mask=None):
+    def __init__(self,emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, c, k, n_experts,depth, engram_layer, every_2, mask=None):
         super().__init__()
         if every_2 :
             self.layer = nn.ModuleList([layer for _ in range(depth//2) for layer in (

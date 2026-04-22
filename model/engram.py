@@ -8,9 +8,11 @@ from dataclasses import dataclass
 @dataclass
 class engram_config :
     embd_d: int = 512
-    engram_vocab_size: int = 2262400
+    engram_vocab_size: int = [2262400, 2262400]
     max_ngram: int = 3
     engram_d: int = 1280
+    n_streams: int = 8
+    
     
 
 class ShortConv(nn.Module):
