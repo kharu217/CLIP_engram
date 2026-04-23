@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from dataclasses import dataclass
 from modules import MSA_Encoder, MOE_Encoder
+from engram import engram_config
 
 @dataclass
 class TETConfig:

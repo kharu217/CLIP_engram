@@ -1,8 +1,10 @@
 import torch
 from torch import Tensor, nn
+import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from dataclasses import dataclass
 from modules import MSA_Encoder, MOE_Encoder
+from engram import engram_config
 
 @dataclass
 class ViTConfig:
@@ -23,32 +25,45 @@ class ViTConfig:
 
 
 class PatchEmbedding(nn.Module):
-    def __init__(self, cfg:ViTConfig):
-        self.patch_size = cfg.patch_size
+    def __init__(self, cfg:ViTConfig, engram_cfg:engram_config=None):
         super().__init__()
+
+        self.engram_cfg = engram_cfg
+
+        self.patch_size = cfg.patch_size
         self.projection = nn.Sequential(
             # using a conv layer instead of a linear one -> performance gains
             nn.Conv2d(cfg.in_channels, cfg.emb_dim, kernel_size=cfg.patch_size, stride=cfg.patch_size),
             Rearrange('b e (h) (w) -> b (h w) e'),
         )
+        if engram_config :
+            self.to_dis_token = nn.Sequential(
+                # using a conv layer instead of a linear one -> performance gains
+                nn.Conv2d(cfg.in_channels, engram_config.vocab_size, kernel_size=cfg.patch_size, stride=cfg.patch_size),
+                Rearrange('b e (h) (w) -> b (h w) e'),
+            )
+            self.temparature = torch.exp(nn.Parameter(torch.log(torch.tensor(1.0))))
+
         self.positions = nn.Parameter(torch.randn((cfg.img_size // cfg.patch_size) **2, cfg.emb_dim))
 
-        
     def forward(self, x: Tensor) -> Tensor:
         b, _, _, _ = x.shape
         x = self.projection(x)
+        engram_token = torch.argmax(F.gumbel_softmax(self.to_dis_token(x), hard=True, tau=self.temparature), dim=2)
         # add position embedding
         x += self.positions
-        return x
+        return x, engram_token
 
 
 class VIT(nn.Module) :
-    def __init__(self, cfg:ViTConfig):
+    def __init__(self, cfg:ViTConfig, engram_cfg:engram_config=None):
         super().__init__()
         self.use_moe = cfg.use_moe
         
-        self.patch_emb = PatchEmbedding(cfg)
-        self.Encoder = MOE_Encoder(ffn_dropout=cfg.ffn_dropout,
+        self.patch_emb = PatchEmbedding(cfg, engram_cfg=engram_cfg)
+
+        if cfg.use_moe :
+            self.Encoder = MOE_Encoder(ffn_dropout=cfg.ffn_dropout,
                                    attn_dropout=cfg.attn_dropout,
                                    depth=cfg.depth,
                                    emb_dim=cfg.emb_dim,
@@ -57,8 +72,11 @@ class VIT(nn.Module) :
                                    c=cfg.c,
                                    k=cfg.k,
                                    n_experts=cfg.n_experts,
-                                   every_2=cfg.every_2
-                                   ) if cfg.use_moe else MSA_Encoder(ffn_dropout=cfg.ffn_dropout,
+                                   every_2=cfg.every_2,
+                                   engram_cfg=engram_cfg
+                                   )
+        else :
+            self.Encoder = MSA_Encoder(ffn_dropout=cfg.ffn_dropout,
                                    attn_dropout=cfg.attn_dropout,
                                    depth=cfg.depth,
                                    emb_dim=cfg.emb_dim,
@@ -66,7 +84,7 @@ class VIT(nn.Module) :
                                    n_heads=cfg.n_heads)
 
     def forward(self, x) :
-        emb = self.patch_emb(x)
+        emb, engram_token = self.patch_emb(x)
         if self.use_moe :
             out, aux_loss = self.Encoder(emb)
         else :

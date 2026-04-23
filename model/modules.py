@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from engram import EngramModule
+from engram import EngramModule, engram_config
 
 class Fast_GELU(nn.Module) :
     def forward(self, x: torch.Tensor):
@@ -179,6 +179,59 @@ class SwitchMoE(nn.Module):
         return moe_output, loss
 
 
+class mHyperConnectionWrapper(nn.Module):
+    def __init__(self, hidden_size: int, hc_mult: int, sinkhorn_iter: int = 5):
+        super().__init__()
+        self.hc_mult = hc_mult
+        self.sinkhorn_iter = sinkhorn_iter
+
+        # HC matrix: [n+1, n+1]
+        # 논문 구조: 상단 n행 = 스트림 간 mixing (width-connection)
+        #            하단 1행 = sublayer 출력 분배 (depth-connection)
+        self.W = nn.Parameter(torch.eye(hc_mult + 1))  # identity로 초기화
+
+        # dynamic component
+        self.dynamic_proj = nn.Linear(hidden_size, hc_mult + 1, bias=False)
+
+    @classmethod
+    def sinkhorn_knopp(A: torch.Tensor, n_iter: int = 5) -> torch.Tensor:
+        log_A = torch.log(A.abs() + 1e-8)
+        for _ in range(n_iter):
+            log_A = log_A - torch.logsumexp(log_A, dim=-1, keepdim=True)
+            log_A = log_A - torch.logsumexp(log_A, dim=-2, keepdim=True)
+        return torch.exp(log_A)
+
+    def get_constrained_W(self) -> torch.Tensor:
+        """W를 Birkhoff polytope에 projection"""
+        return self.sinkhorn_knopp(self.W, self.sinkhorn_iter)  # [n+1, n+1]
+
+    def forward(self, H: torch.Tensor, h_out: torch.Tensor) -> torch.Tensor:
+        """
+        H:     [B, L, n, d]  이전 스트림
+        h_out: [B, L, d]     sublayer 출력
+        return [B, L, n, d]
+        """
+        B, L, n, d = H.shape
+
+        W = self.get_constrained_W()  # [n+1, n+1]
+
+        # H_aug: [B, L, n+1, d] — 스트림 n개 + sublayer 출력 1개
+        h_out_exp = h_out.unsqueeze(2)                        # [B, L, 1, d]
+        H_aug = torch.cat([H, h_out_exp], dim=2)             # [B, L, n+1, d]
+
+        # static mixing
+        # W[:n, :] → 출력 스트림 n개를 H_aug n+1개의 가중합으로 생성
+        W_out = W[:n, :]                                      # [n, n+1]
+        H_new = torch.einsum('ij,bljd->blid', W_out, H_aug)  # [B, L, n, d]
+
+        # dynamic component — 토큰별 보정
+        dyn = self.dynamic_proj(H[:, :, 0, :])               # [B, L, n+1]
+        dyn = dyn.softmax(dim=-1)                             # [B, L, n+1]
+        dyn_mix = torch.einsum('blj,bljd->bld', dyn, H_aug)  # [B, L, d]
+        H_new = H_new + dyn_mix.unsqueeze(2)                 # broadcast
+
+        return H_new  # [B, L, n, d]
+
 class FeedForwardBlock(nn.Sequential):
     def __init__(self, emb_size: int, expansion: int = 4, drop_p: float = 0.):
         super().__init__(
@@ -192,7 +245,7 @@ class MSABLock(nn.Module) :
     def __init__(self, emb_dim, n_heads,attn_dropout, ffn_mul, ffn_dropout, mask=None):
         super().__init__()
         self.mask = mask
-
+        
         self.norm1 = nn.LayerNorm(normalized_shape=emb_dim)
         self.norm2 = nn.LayerNorm(normalized_shape=emb_dim)
 
@@ -244,21 +297,29 @@ class MOEBlock(nn.Module) :
         x = x + feat
         out, aux_loss = self.moe(self.norm2(x))
         out = out + x
-
-        out = out.contiguous.reshape((B, L, hc, D))
+        if x.shape.count() :
+            out = out.contiguous.reshape((B, L, hc, D))
         return out, aux_loss
 
-class MSA_Encoder(nn.Sequential) :
-    def __init__(self,emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, depth, engram_layer,mask=None):
-        super().__init__(*[MSABLock(emb_dim=emb_dim,
+class MSA_Encoder(nn.Module) :
+    def __init__(self, engram_cfg:engram_config, emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, depth,mask=None):
+        super().__init__()
+        self.MSA_layers = nn.ModuleList([MSABLock(emb_dim=emb_dim,
                                     n_heads=n_heads,
                                     attn_dropout=attn_dropout,
                                     ffn_mul=ffn_mul,
                                     ffn_dropout=ffn_dropout,
                                     mask=mask) for _ in range(depth)])
+        if engram_config.engram_layer_n :
+            self.engram_layer = nn.ModuleList([EngramModule(engram_cfg) for _ in engram_config.engram_layer_n])
 
+    def forward(self, x, engram_embedding_table:nn.Embedding) :
+        for idx, layer in enumerate(self.MSA_layers) :
+            if idx in self.engram_layer()
+        
+    
 class MOE_Encoder(nn.Module) :
-    def __init__(self,emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, c, k, n_experts,depth, engram_layer, every_2, mask=None):
+    def __init__(self,emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, c, k, n_experts,depth, every_2, mask=None, engram_cfg:engram_config=None):
         super().__init__()
         if every_2 :
             self.layer = nn.ModuleList([layer for _ in range(depth//2) for layer in (

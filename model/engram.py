@@ -10,10 +10,10 @@ class engram_config :
     embd_d: int = 512
     engram_vocab_size: int = [2262400, 2262400]
     max_ngram: int = 3
-    engram_d: int = 1280
+    engram_embd_d: int = 1280
     n_streams: int = 8
-    
-    
+    engram_layer_n = [2, 8]
+    vocab_size: int = 49408
 
 class ShortConv(nn.Module):
     def __init__(self, hidden_size, kernel_size=4, dilation=1, hc_mult=4):
@@ -86,35 +86,37 @@ class NgramHashMapping(nn.Module):
 
 
 class EngramModule(nn.Module):
-    def __init__(self, embd_d ,engram_vocab_size, max_ngram, engram_embd_d, n_streams):
+    def __init__(self, engram_cfg:engram_config):
         super().__init__()
-        self.engram_vocab_size = engram_vocab_size
-        self.embd_d = embd_d
-        self.n_streams = n_streams
 
-        self.hasher = NgramHashMapping(engram_vocab_size, max_ngram)
-        total_slots = sum(engram_vocab_size) * self.hasher.num_heads
-        self.embedding = nn.Embedding(total_slots, engram_embd_d)
+        self.engram_vocab_size = engram_cfg.engram_vocab_size
+        self.embd_d = engram_cfg.embd_d
+        self.n_streams = engram_cfg.n_streams
 
-        total_ngrams = len(engram_vocab_size) * self.hasher.num_heads
-        input_dim = total_ngrams * engram_embd_d
+        self.hasher = NgramHashMapping(engram_cfg.engram_vocab_size, engram_cfg.max_ngram)
+        total_slots = sum(engram_cfg.engram_vocab_size) * self.hasher.num_heads
+        
+        #self.embedding = nn.Embedding(total_slots, engram_cfg.engram_embd_d)
 
-        self.val_proj = nn.Linear(input_dim, embd_d)
+        total_ngrams = len(engram_cfg.engram_vocab_size) * self.hasher.num_heads
+        input_dim = total_ngrams * engram_cfg.engram_embd_d
+
+        self.val_proj = nn.Linear(input_dim, engram_config.embd_d)
         self.key_projs = nn.ModuleList([
-            nn.Linear(input_dim, embd_d) for _ in range(n_streams)
+            nn.Linear(input_dim, engram_config.embd_d) for _ in range(engram_config.n_streams)
         ])
-        self.norm_q = nn.ModuleList([nn.RMSNorm(embd_d) for _ in range(n_streams)])
-        self.norm_k = nn.ModuleList([nn.RMSNorm(embd_d) for _ in range(n_streams)])
-        self.conv = ShortConv(embd_d, hc_mult=n_streams)
+        self.norm_q = nn.ModuleList([nn.RMSNorm(engram_config.embd_d) for _ in range(engram_config.n_streams)])
+        self.norm_k = nn.ModuleList([nn.RMSNorm(engram_config.embd_d) for _ in range(engram_config.n_streams)])
+        self.conv = ShortConv(engram_config.embd_d, hc_mult=engram_config.n_streams)
 
-    def forward(self, x, input_ids):
+    def forward(self, x, input_ids, embedding_table:nn.Embedding):
         hash_ids = self.hasher(input_ids)
         offsets = torch.tensor([0] + [v for v in self.engram_vocab_size for _ in range(self.hasher.num_heads)],
                                device=x.device)
         offsets = torch.cumsum(offsets, dim=0)[:-1]
         hash_ids = hash_ids + offsets
 
-        emb = self.embedding(hash_ids).flatten(start_dim=2)
+        emb = embedding_table(hash_ids).flatten(start_dim=2)
         v_base = self.val_proj(emb)
 
         gates = []

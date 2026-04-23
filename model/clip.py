@@ -92,5 +92,3 @@ if __name__ == "__main__" :
     l_i, l_t, _, _ = temp_model([test_img, test_text])
     print(l_i.shape)
     print(l_t.shape)
-
-
