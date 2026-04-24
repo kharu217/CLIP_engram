@@ -178,59 +178,102 @@ class SwitchMoE(nn.Module):
 
         return moe_output, loss
 
-
-class mHyperConnectionWrapper(nn.Module):
-    def __init__(self, hidden_size: int, hc_mult: int, sinkhorn_iter: int = 5):
+class mHyperConnection(nn.Module):
+    def __init__(self, hidden_size: int, n: int, sinkhorn_iter: int = 20):
         super().__init__()
-        self.hc_mult = hc_mult
+        self.n = n
+        self.C = hidden_size
         self.sinkhorn_iter = sinkhorn_iter
+        nC = n * hidden_size
 
-        # HC matrix: [n+1, n+1]
-        # 논문 구조: 상단 n행 = 스트림 간 mixing (width-connection)
-        #            하단 1행 = sublayer 출력 분배 (depth-connection)
-        self.W = nn.Parameter(torch.eye(hc_mult + 1))  # identity로 초기화
+        # 논문 eq(10~13): 파라미터를 하나로 통합
+        # φ_l: [nC, n²+2n] — pre/post/res projection 통합
+        self.phi = nn.Linear(nC, n * n + 2 * n, bias=False)  # φ_l
 
-        # dynamic component
-        self.dynamic_proj = nn.Linear(hidden_size, hc_mult + 1, bias=False)
+        # b_l: [1, n²+2n] — static bias 통합
+        # 초기화: b_pre=0(sigmoid→0.5), b_post=0(2sigmoid→1.0), b_res=identity flatten
+        b_init = torch.zeros(n * n + 2 * n)
+        # b_res 부분을 identity로 초기화
+        b_res_init = torch.eye(n).flatten()
+        b_init[2 * n:] = b_res_init
+        self.b = nn.Parameter(b_init)  # [n²+2n]
 
-    @classmethod
-    def sinkhorn_knopp(A: torch.Tensor, n_iter: int = 5) -> torch.Tensor:
-        log_A = torch.log(A.abs() + 1e-8)
+        # α scalars — small value 초기화
+        self.alpha_pre  = nn.Parameter(torch.tensor(0.0))
+        self.alpha_post = nn.Parameter(torch.tensor(0.0))
+        self.alpha_res  = nn.Parameter(torch.tensor(0.0))
+
+        # RMSNorm: nC 차원에 적용
+        self.norm = nn.RMSNorm(nC)
+
+    @staticmethod
+    @torch.jit.script
+    def sinkhorn_knopp(H_tilde: torch.Tensor, n_iter: int = 20) -> torch.Tensor:
+        M = torch.exp(H_tilde)  # [B*L, n, n]
         for _ in range(n_iter):
-            log_A = log_A - torch.logsumexp(log_A, dim=-1, keepdim=True)
-            log_A = log_A - torch.logsumexp(log_A, dim=-2, keepdim=True)
-        return torch.exp(log_A)
+            M = M / M.sum(dim=-1, keepdim=True)   # row normalize T_c
+            M = M / M.sum(dim=-2, keepdim=True)   # col normalize T_r
+        return M
 
-    def get_constrained_W(self) -> torch.Tensor:
-        """W를 Birkhoff polytope에 projection"""
-        return self.sinkhorn_knopp(self.W, self.sinkhorn_iter)  # [n+1, n+1]
-
-    def forward(self, H: torch.Tensor, h_out: torch.Tensor) -> torch.Tensor:
+    def get_mappings(self, x: torch.Tensor):
         """
-        H:     [B, L, n, d]  이전 스트림
-        h_out: [B, L, d]     sublayer 출력
-        return [B, L, n, d]
+        x: [B, L, n, C]
         """
-        B, L, n, d = H.shape
+        B, L, n, C = x.shape
+        nC = n * C
 
-        W = self.get_constrained_W()  # [n+1, n+1]
+        # flatten: [B, L, n, C] → [B, L, nC]
+        x_vec = x.reshape(B, L, nC)
 
-        # H_aug: [B, L, n+1, d] — 스트림 n개 + sublayer 출력 1개
-        h_out_exp = h_out.unsqueeze(2)                        # [B, L, 1, d]
-        H_aug = torch.cat([H, h_out_exp], dim=2)             # [B, L, n+1, d]
+        # RMSNorm on last dim (nC)
+        x_vec_norm = self.norm(x_vec)  # [B, L, nC]
 
-        # static mixing
-        # W[:n, :] → 출력 스트림 n개를 H_aug n+1개의 가중합으로 생성
-        W_out = W[:n, :]                                      # [n, n+1]
-        H_new = torch.einsum('ij,bljd->blid', W_out, H_aug)  # [B, L, n, d]
+        # 통합 projection: [B, L, nC] @ [nC, n²+2n] → [B, L, n²+2n]
+        proj = x_vec_norm @ self.phi.weight.T  # [B, L, n²+2n]
 
-        # dynamic component — 토큰별 보정
-        dyn = self.dynamic_proj(H[:, :, 0, :])               # [B, L, n+1]
-        dyn = dyn.softmax(dim=-1)                             # [B, L, n+1]
-        dyn_mix = torch.einsum('blj,bljd->bld', dyn, H_aug)  # [B, L, d]
-        H_new = H_new + dyn_mix.unsqueeze(2)                 # broadcast
+        # split: pre[n], post[n], res[n²]
+        proj_pre  = proj[..., :n]           # [B, L, n]
+        proj_post = proj[..., n:2*n]        # [B, L, n]
+        proj_res  = proj[..., 2*n:]         # [B, L, n²]
 
-        return H_new  # [B, L, n, d]
+        b_pre  = self.b[:n]                 # [n]
+        b_post = self.b[n:2*n]             # [n]
+        b_res  = self.b[2*n:]              # [n²]
+
+        # H̃ = α * proj + b
+        H_tilde_pre  = self.alpha_pre  * proj_pre  + b_pre   # [B, L, n]
+        H_tilde_post = self.alpha_post * proj_post + b_post  # [B, L, n]
+        H_tilde_res  = self.alpha_res  * proj_res  + b_res   # [B, L, n²]
+
+        # 논문 eq(8): manifold projection
+        H_pre  = torch.sigmoid(H_tilde_pre)           # [B, L, n]
+        H_post = 2.0 * torch.sigmoid(H_tilde_post)    # [B, L, n]
+        H_res  = self.sinkhorn_knopp(
+            H_tilde_res.view(B * L, n, n), self.sinkhorn_iter
+        ).view(B, L, n, n)                            # [B, L, n, n]
+
+        return H_pre, H_post, H_res
+
+    def forward(self, x: torch.Tensor, sublayer_fn) -> torch.Tensor:
+        """
+        논문 eq(3): x_{l+1} = H_res @ x_l + H_post^T @ F(H_pre @ x_l)
+        x: [B, L, n, C]
+        """
+        H_pre, H_post, H_res = self.get_mappings(x)
+
+        # H_pre @ x_l: [B,L,n] weighted sum → [B,L,C]
+        h_in = (H_pre.unsqueeze(-1) * x).sum(dim=2)           # [B, L, C]
+
+        # sublayer
+        h_out = sublayer_fn(h_in)                              # [B, L, C]
+
+        # H_res @ x_l: stream mixing
+        x_res = torch.einsum('blij,bljc->blic', H_res, x)     # [B, L, n, C]
+
+        # H_post^T @ h_out: expand back
+        x_new = x_res + H_post.unsqueeze(-1) * h_out.unsqueeze(2)  # [B, L, n, C]
+
+        return x_new
 
 class FeedForwardBlock(nn.Sequential):
     def __init__(self, emb_size: int, expansion: int = 4, drop_p: float = 0.):
@@ -242,7 +285,7 @@ class FeedForwardBlock(nn.Sequential):
         )
 
 class MSABLock(nn.Module) :
-    def __init__(self, emb_dim, n_heads,attn_dropout, ffn_mul, ffn_dropout, mask=None):
+    def __init__(self, emb_dim, n_heads,attn_dropout, ffn_mul, ffn_dropout, hc_mult,mask=None):
         super().__init__()
         self.mask = mask
         
@@ -256,27 +299,30 @@ class MSABLock(nn.Module) :
         self.FFN = FeedForwardBlock(emb_size=emb_dim,
                                     expansion=ffn_mul,
                                     drop_p=ffn_dropout)
-    def forward(self, x) :
-        if x.shape.count() == 4 :
-            B, L, hc, D = x.shape
-            x = x.contiguous.reshape((B*hc, L, D))
-
-        norm_x = self.norm1(x)
-        feat, _ = self.MSA(norm_x, norm_x, norm_x, need_weights=False)
-        x = x + feat
-        out = self.FFN(self.norm2(x))
-        out = out + x
         
-        if x.shape.count() == 4 :
-            out = out.contiguous.reshape((B, L, hc, D))
-        return out
+        self.mhc_attn = mHyperConnection(emb_dim, hc_mult, sinkhorn_iter=5)
+    def forward(self, x):
+        """
+        x: [B, L, n, C]  ← mHC stream format
+        """
+        
+        def attn_fn(h):
+            # h: [B, L, C]
+            out, _ = self.MSA(h, h, h,
+                              attn_mask=self.mask,
+                              need_weights=False)
+            return out
+
+        x = self.hc_attn(x, attn_fn)          # [B, L, n, C]
+        x = self.hc_ffn(x, self.FFN)          # [B, L, n, C]
+        return x
     
-class MOEBlock(nn.Module) :
-    def __init__(self, emb_dim, n_heads,attn_dropout, ffn_mul, ffn_dropout, n_experts, k, c, mask=None):
+class MOEBlock(nn.Module):
+    def __init__(self, emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout,
+                 n_experts, k, c, mask=None, hc_mult=4, sinkhorn_iter=20):
         super().__init__()
         self.mask = mask
-        self.norm1 = nn.LayerNorm(normalized_shape=emb_dim)
-        self.norm2 = nn.LayerNorm(normalized_shape=emb_dim)
+
         self.MSA = nn.MultiheadAttention(embed_dim=emb_dim,
                                          num_heads=n_heads,
                                          dropout=attn_dropout,
@@ -287,36 +333,63 @@ class MOEBlock(nn.Module) :
                              k=k,
                              capacity_factor=c,
                              drop_p=ffn_dropout)
-    def forward(self, x:torch.Tensor) :
-        if x.shape.count() == 4 :
-            B, L, hc, D = x.shape
-            x = x.contiguous.reshape((B*hc, L, D))
 
-        norm_x = self.norm1(x)
-        feat, _ = self.MSA(norm_x, norm_x, norm_x)
-        x = x + feat
-        out, aux_loss = self.moe(self.norm2(x))
-        out = out + x
-        if x.shape.count() :
-            out = out.contiguous.reshape((B, L, hc, D))
-        return out, aux_loss
+        self.hc_attn = mHyperConnection(emb_dim, hc_mult, sinkhorn_iter)
+        self.hc_moe  = mHyperConnection(emb_dim, hc_mult, sinkhorn_iter)
+
+    def forward(self, x: torch.Tensor):
+        """x: [B, L, n, C]"""
+
+        def attn_fn(h):
+            out, _ = self.MSA(h, h, h,
+                              attn_mask=self.mask,
+                              need_weights=False)
+            return out
+
+        x = self.hc_attn(x, attn_fn)    # [B, L, n, C]
+
+        # aux_loss를 closure로 캡처
+        aux_loss_container = []
+        def moe_fn(h):
+            out, aux = self.moe(h)
+            aux_loss_container.append(aux)
+            return out
+
+        x = self.hc_moe(x, moe_fn)      # [B, L, n, C]
+
+        return x, aux_loss_container[0]
 
 class MSA_Encoder(nn.Module) :
-    def __init__(self, engram_cfg:engram_config, emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, depth,mask=None):
+    def __init__(self, emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, depth,mask=None, engram_cfg:engram_config=None):
         super().__init__()
+        self.engram_cfg = engram_cfg
+
         self.MSA_layers = nn.ModuleList([MSABLock(emb_dim=emb_dim,
                                     n_heads=n_heads,
                                     attn_dropout=attn_dropout,
                                     ffn_mul=ffn_mul,
                                     ffn_dropout=ffn_dropout,
-                                    mask=mask) for _ in range(depth)])
+                                    mask=mask,
+                                    hc_mult=hc_mult) for _ in range(depth)])
         if engram_config.engram_layer_n :
             self.engram_layer = nn.ModuleList([EngramModule(engram_cfg) for _ in engram_config.engram_layer_n])
+            self.engram_mhc = nn.ModuleList([mHyperConnection(emb_dim, hc_mult, sinkhorn_iter=5)])
 
-    def forward(self, x, engram_embedding_table:nn.Embedding) :
+    def forward(self, x, engram_embedding_table=None, engram_token_id=None) :
+        out = x
         for idx, layer in enumerate(self.MSA_layers) :
-            if idx in self.engram_layer()
-        
+            if idx + 1 in self.engram_cfg.engram_layer_n :
+                layer_idx = self.engram_cfg.engram_layer_n.index(idx)
+
+                def engram_fn(h) :
+                    out = self.engram_layer[layer_idx](h, engram_token_id, engram_embedding_table[layer_idx])
+                    return out
+                out = self.engram_mhc[layer_idx](x, engram_fn)
+                out = layer(out)
+            else :
+                out = layer(out)
+        return out
+
     
 class MOE_Encoder(nn.Module) :
     def __init__(self,emb_dim, n_heads, attn_dropout, ffn_mul, ffn_dropout, c, k, n_experts,depth, every_2, mask=None, engram_cfg:engram_config=None):
@@ -327,7 +400,8 @@ class MOE_Encoder(nn.Module) :
                                         n_heads=n_heads,
                                         attn_dropout=attn_dropout,
                                         ffn_mul=ffn_mul,
-                                        ffn_dropout=ffn_dropout, 
+                                        hc_mult=engram_cfg.n_streams,
+                                        ffn_dropout=ffn_dropout,
                                         mask=mask),
 
                             MOEBlock(emb_dim=emb_dim,
@@ -338,12 +412,14 @@ class MOE_Encoder(nn.Module) :
                                         c=c,
                                         k=k,
                                         n_experts=n_experts,
+                                        hc_mult=engram_cfg.n_streams,
                                         mask=mask))])
         else :
             self.layer = nn.ModuleList([MSABLock(emb_dim=emb_dim,
                                     n_heads=n_heads,
                                     attn_dropout=attn_dropout,
                                     ffn_mul=ffn_mul,
+                                    hc_mult=engram_cfg.n_streams,
                                     ffn_dropout=ffn_dropout, mask=mask) for _ in range(depth-2)])
             for _ in range(2) :
                 self.layer.append(MOEBlock(emb_dim=emb_dim,
@@ -354,8 +430,11 @@ class MOE_Encoder(nn.Module) :
                                         c=c,
                                         k=k,
                                         n_experts=n_experts,
+                                        hc_mult=engram_cfg.n_streams,
                                         mask=mask))
-
+        if engram_config.engram_layer_n :
+            self.engram_layer = nn.ModuleList([EngramModule(engram_cfg) for _ in engram_config.engram_layer_n])
+            self.engram_mhc = nn.ModuleList([mHyperConnection(emb_dim, engram_cfg.n_streams, sinkhorn_iter=5)])
 
     def forward(self, x) :
         aux_loss = 0
@@ -370,4 +449,4 @@ class MOE_Encoder(nn.Module) :
 if __name__ == "__main__" :
     import torchinfo
     test_model = MOE_Encoder(100, 4, 0.1, 1, 0.1, 1, 1, 16, 4, False)
-    torchinfo.summary(test_model, input_size=(10, 32, 100)) 
+    torchinfo.summary(test_model, input_size=(10, 32, 100))

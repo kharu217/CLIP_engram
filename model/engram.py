@@ -11,7 +11,7 @@ class engram_config :
     engram_vocab_size: int = 2262400
     max_ngram: int = 3
     engram_embd_d: int = 1280
-    n_streams: int = 8
+    n_streams: int = 4
     engram_layer_n = [2, 8]
     vocab_size: int = 49408
 
@@ -132,7 +132,7 @@ class EngramModule(nn.Module):
         gates = torch.stack(gates, dim=2)
         v_gated = v_base.unsqueeze(2) * gates
         y = v_gated + self.conv(v_gated)
-        return y    
+        return y
 
 if __name__ == "__main__" :
     temp = NgramHashMapping([100, 100], 3)
