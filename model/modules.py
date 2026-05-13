@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from engram import EngramModule, EngramConfig
+from .engram import EngramModule, EngramConfig
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 

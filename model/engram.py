@@ -5,19 +5,21 @@ import torch.nn.functional as F
 
 import math
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
+
+def engram_layer_set() :
+    return [2, 6]
 
 @dataclass
 class EngramConfig :
+    engram_layer_n: List[int] = field(init=True, default_factory=engram_layer_set)
     embd_d: int = 512
     engram_embd_d: int = 1280
-    engram_layer_n = [2, 8]
 
     engram_vocab_size: int = 226
-    
+
     max_ngram: int = 3
-    
 
 class ShortConv(nn.Module):
     def __init__(self, hidden_size, kernel_size=4, dilation=1, hc_mult=4):

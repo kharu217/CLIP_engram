@@ -2,8 +2,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from dataclasses import dataclass
-from modules import MSA_Encoder, MOE_Encoder
-from engram import EngramConfig
+from .modules import MSA_Encoder, MOE_Encoder
+from .engram import EngramConfig
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -34,7 +34,7 @@ class TetConfig:
 
     # MHC
     use_mhc: bool = False
-    hc_mult: int = 4
+    hc_mult: int = 1
 
     # etc
     device:str = "cuda"

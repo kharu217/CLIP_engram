@@ -3,8 +3,8 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from dataclasses import dataclass
-from modules import MSA_Encoder, MOE_Encoder
-from engram import EngramConfig
+from .modules import MSA_Encoder, MOE_Encoder
+from .engram import EngramConfig
 
 @dataclass
 @dataclass
@@ -35,7 +35,7 @@ class VitConfig:
 
     # MHC
     use_mhc: bool = False
-    hc_mult: int = 4
+    hc_mult: int = 1
 
     # etc
     device: str = "cuda"

@@ -2,10 +2,10 @@ import torch
 from torch import Tensor, nn
 import numpy as np
 
-from Image_encoder import VIT
-from text_encoder import TET
+from .Image_encoder import VIT
+from .text_encoder import TET
 
-from model_configs import clip_config, clip_config_set
+from .model_configs import clip_config, clip_config_set
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
