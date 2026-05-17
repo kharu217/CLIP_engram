@@ -32,7 +32,7 @@ class CLIP(nn.Module) :
 
         if self.t_engram_cfg :
             self.engram_embedding = nn.ModuleList([
-                nn.Embedding((self.i_engram_cfg.engram_vocab_size * len(range(self.i_engram_cfg.max_ngram - 1))) * 2, self.i_engram_cfg.engram_embd_d) for _ in self.i_engram_cfg.engram_layer_n
+                nn.Embedding((self.i_engram_cfg.engram_vocab_size * len(range(self.i_engram_cfg.max_ngram - 1))) * 2, self.i_engram_cfg.engram_embd_d) for _ in range(2, self.i_engram_cfg.max_ngram+1)
             ])
         else :
             self.engram_embedding = None
@@ -91,16 +91,16 @@ class CLIP(nn.Module) :
             return output, aux_loss
         return output
 
-    def forward(self, data) :
+    def forward(self, img, text) :
         if self.i_cfg.use_moe :
-            image_feature, i_aux_loss = self.encode_image(data[0])
+            image_feature, i_aux_loss = self.encode_image(img)
         else :
-            image_feature = self.encode_image(data[0])
+            image_feature = self.encode_image(img)
 
         if self.t_cfg.use_moe :
-            text_feature, t_aux_loss = self.encode_text(data[1])
+            text_feature, t_aux_loss = self.encode_text(text)
         else :
-            text_feature = self.encode_text(data[1])
+            text_feature = self.encode_text(text)
 
         #norm
         image_feature = image_feature / image_feature.norm(dim=1, keepdim=True)
@@ -112,13 +112,3 @@ class CLIP(nn.Module) :
         logit_per_text = logit_per_image.t()
 
         return logit_per_image, logit_per_text, (t_aux_loss if self.t_cfg.use_moe else None), (i_aux_loss if self.i_cfg.use_moe else None)
-
-if __name__ == "__main__" :
-    import model_configs
-    import torchinfo
-
-    temp_model = CLIP(clip_cfg=clip_config_set.clip_150M_normal).to(device="cuda", dtype=torch.float32)
-    test_img = torch.randn((100, 3,224, 224), device="cuda", dtype=torch.float32)
-    test_text = torch.randint(0, 100, (100, 77), device="cuda", dtype=torch.int32)
-
-    torchinfo.summary(temp_model, input_data=[(test_img, test_text)])

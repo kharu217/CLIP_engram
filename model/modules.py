@@ -285,10 +285,10 @@ class mHyperConnection(nn.Module):
 class FeedForwardBlock(nn.Sequential):
     def __init__(self, emb_size: int, expansion: int = 4, drop_p: float = 0.):
         super().__init__(
-            nn.Linear(emb_size, expansion * emb_size),
+            nn.Linear(emb_size, int(expansion * emb_size)),
             Fast_GELU(),
             nn.Dropout(drop_p),
-            nn.Linear(expansion * emb_size, emb_size),
+            nn.Linear(int(expansion * emb_size), emb_size),
         )
 
 class MSABLock(nn.Module) :
