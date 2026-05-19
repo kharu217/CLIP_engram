@@ -487,13 +487,12 @@ class MOE_Encoder(nn.Module) :
                                         mask=mask))
         if engram_config :
             if use_mhc :
-                self.engram_layer = nn.ModuleList([EngramModule(engram_config, n_streams=hc_mult) for _ in engram_config.engram_layer_n])
+                self.engram_layer = nn.ModuleList([EngramModule(engram_config, n_streams=hc_mult, use_mhc=use_mhc) for _ in engram_config.engram_layer_n])
                 self.engram_mhc = nn.ModuleList([mHyperConnection(emb_dim, hc_mult, sinkhorn_iter=20)])
             else :
-                self.engram_layer = nn.ModuleList([EngramModule(engram_config, n_streams=1) for _ in engram_config.engram_layer_n])
+                self.engram_layer = nn.ModuleList([EngramModule(engram_config, n_streams=1, use_mhc=use_mhc) for _ in engram_config.engram_layer_n])
 
     def forward(self, x, engram_embedding_table=None, engram_token_id=None) :
-
         out = x
         aux_loss = 0
         if len(x.shape) == 3 and self.use_mhc:
@@ -506,7 +505,7 @@ class MOE_Encoder(nn.Module) :
                 if self.use_mhc :
                     def engram_fn(h, _idx=layer_idx):
                         return self.engram_layer[_idx](h, engram_token_id, engram_embedding_table[_idx])
-
+                    
                     out = self.engram_mhc[layer_idx](out, engram_fn, need_contract=False)
                 else :
                     out = self.engram_layer[layer_idx](out, engram_token_id, engram_embedding_table[layer_idx])

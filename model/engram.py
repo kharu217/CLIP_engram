@@ -92,9 +92,9 @@ class NgramHashMapping(nn.Module):
 
 
 class EngramModule(nn.Module):
-    def __init__(self, engram_cfg:EngramConfig, n_streams):
+    def __init__(self, engram_cfg:EngramConfig, n_streams, use_mhc):
         super().__init__()
-
+        self.use_mhc = use_mhc
         self.engram_vocab_size = [engram_cfg.engram_vocab_size] * (engram_cfg.max_ngram - 1)
         self.embd_d = engram_cfg.embd_d
         self.engram_embd_d = engram_cfg.engram_embd_d
@@ -145,6 +145,6 @@ class EngramModule(nn.Module):
         v_gated = v_base.unsqueeze(2) * gates
         y = v_gated + self.conv(v_gated)
 
-        if not use_mhc : 
+        if not self.use_mhc : 
             y = y.squeeze(2)
         return y

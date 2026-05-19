@@ -22,7 +22,7 @@ class clip_config :
 
 @dataclass
 class clip_config_set :
-    clip_150M_normal = clip_config(
+    clip_130M_normal = clip_config(
         vit_config = VitConfig(
                 in_channels = 3,
                 img_size = 224,

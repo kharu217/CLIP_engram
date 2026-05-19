@@ -22,7 +22,7 @@ class CLIP(nn.Module) :
         self.image_encoder = VIT(self.i_cfg, self.i_engram_cfg)    
         self.text_encoder = TET(self.t_cfg, self.t_engram_cfg)
 
-        self.ln_t = nn.LayerNorm(self.t_cfg.emb_dim)
+        self.ln_t = nn.LayerNorm(self.t_cfg.emb_dim, )
         self.ln_i = nn.LayerNorm(self.i_cfg.emb_dim)
     
         self.text_proj = nn.Parameter(torch.empty(self.t_cfg.emb_dim, self.t_cfg.emb_dim))
@@ -32,7 +32,7 @@ class CLIP(nn.Module) :
 
         if self.t_engram_cfg :
             self.engram_embedding = nn.ModuleList([
-                nn.Embedding((self.i_engram_cfg.engram_vocab_size * len(range(self.i_engram_cfg.max_ngram - 1))) * 2, self.i_engram_cfg.engram_embd_d) for _ in range(2, self.i_engram_cfg.max_ngram+1)
+                nn.Embedding((self.i_engram_cfg.engram_vocab_size * len(range(self.i_engram_cfg.max_ngram - 1))) * 2, self.i_engram_cfg.engram_embd_d) for _ in self.i_engram_cfg.engram_layer_n
             ])
         else :
             self.engram_embedding = None

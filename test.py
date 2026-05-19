@@ -1,6 +1,7 @@
 from huggingface_hub import login
 from tokenizers import Tokenizer
 
+login()
 
 tokenizer = Tokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
 
