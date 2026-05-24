@@ -30,9 +30,9 @@ class CLIP(nn.Module) :
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
-        if self.t_engram_cfg :
+        if self.t_engram_cfg and self.i_engram_cfg:
             self.engram_embedding = nn.ModuleList([
-                nn.Embedding((self.i_engram_cfg.engram_vocab_size * len(range(self.i_engram_cfg.max_ngram - 1))) * 2, self.i_engram_cfg.engram_embd_d) for _ in self.i_engram_cfg.engram_layer_n
+                nn.Embedding((self.t_engram_cfg.engram_vocab_size * len(self.t_engram_cfg.ngram_n)) * 2, self.t_engram_cfg.engram_embd_d) for _ in self.t_engram_cfg.engram_layer_n
             ])
         else :
             self.engram_embedding = None
@@ -91,7 +91,8 @@ class CLIP(nn.Module) :
             return output, aux_loss
         return output
 
-    def forward(self, img, text) :
+    def forward(self, x) :
+        img, text = x
         if self.i_cfg.use_moe :
             image_feature, i_aux_loss = self.encode_image(img)
         else :

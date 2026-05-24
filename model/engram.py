@@ -8,18 +8,21 @@ import math
 from dataclasses import dataclass, field
 from typing import List
 
-def engram_layer_set() :
+def engram_layer_init() :
+    return [2, 6]
+
+def ngram_n_set() :
     return [2, 6]
 
 @dataclass
 class EngramConfig :
-    engram_layer_n: List[int] = field(init=True, default_factory=engram_layer_set)
+    engram_layer_n: List[int] = field(init=True, default_factory=engram_layer_init)
     embd_d: int = 512
     engram_embd_d: int = 1280
 
     engram_vocab_size: int = 226
 
-    max_ngram: int = 3
+    ngram_n: List[int] = field(init=True, default_factory=ngram_n_set)
 
 class ShortConv(nn.Module):
     def __init__(self, hidden_size, kernel_size=4, dilation=1, hc_mult=4):
@@ -53,15 +56,16 @@ class ShortConv(nn.Module):
 
 
 class NgramHashMapping(nn.Module):
-    def __init__(self, vocab_sizes, max_ngram, num_heads=2, seed=42):
+    def __init__(self, vocab_sizes, ngram_n, num_heads=2, seed=42):
         super().__init__()
-        self.vocab_sizes = [vocab_sizes] * (max_ngram - 1)
-        self.max_ngram = max_ngram
+        torch.manual_seed(seed)
+        self.vocab_sizes = [vocab_sizes] * (len(ngram_n))
+        self.ngram_n = ngram_n
         self.num_heads = num_heads
 
         self.register_buffer(
             'multipliers',
-            torch.randint(1, 10000, (max_ngram - 1, num_heads, max_ngram))
+            torch.randint(1, 10000, (len(ngram_n), num_heads, len(ngram_n)))
         )
         self.register_buffer(
             'modulos',
@@ -75,8 +79,8 @@ class NgramHashMapping(nn.Module):
         windows = padded.unfold(dimension=1, size=self.max_ngram, step=1)
         all_hashes = []
 
-        for n_idx in range(self.max_ngram - 1):
-            ngram_len = n_idx + 2
+        for n_idx in self.ngram_n :
+            ngram_len = n_idx
             current_grams = windows[:, :, -ngram_len:]
             mults = self.multipliers[n_idx, :, :ngram_len]
             mixed = current_grams.unsqueeze(2) * mults.unsqueeze(0).unsqueeze(0)
@@ -94,13 +98,13 @@ class NgramHashMapping(nn.Module):
 class EngramModule(nn.Module):
     def __init__(self, engram_cfg:EngramConfig, n_streams, use_mhc):
         super().__init__()
-        self.use_mhc = use_mhc
-        self.engram_vocab_size = [engram_cfg.engram_vocab_size] * (engram_cfg.max_ngram - 1)
+
+        self.engram_vocab_size = [engram_cfg.engram_vocab_size] * len(engram_cfg.ngram_n)
         self.embd_d = engram_cfg.embd_d
         self.engram_embd_d = engram_cfg.engram_embd_d
         self.n_streams = n_streams
 
-        self.hasher = NgramHashMapping(engram_cfg.engram_vocab_size, engram_cfg.max_ngram)
+        self.hasher = NgramHashMapping(engram_cfg.engram_vocab_size, engram_cfg.ngram_n)
         self.total_slots = sum(self.hasher.vocab_sizes) * self.hasher.num_heads
         
         #self.embedding = nn.Embedding(total_slots, engram_cfg.engram_embd_d)

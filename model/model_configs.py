@@ -123,7 +123,7 @@ class clip_config_set :
             engram_embd_d=158,
             embd_d=768,
             engram_vocab_size=172050,
-            max_ngram=3
+            ngram_n=3
         ),
         tet_config = TetConfig(
                 vocab_size = 128256,
@@ -147,6 +147,6 @@ class clip_config_set :
             engram_embd_d=158,
             embd_d=512,
             engram_vocab_size=172050,
-            max_ngram=3
+            ngram_n=3
         ),
     )
